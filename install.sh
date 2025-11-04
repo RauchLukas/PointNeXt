@@ -2,37 +2,27 @@
 # command to install this enviroment: source init.sh
 
 # install miniconda3 if not installed yet.
-#wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-#bash Miniconda3-latest-Linux-x86_64.sh
-#source ~/.bashrc
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+source ~/.bashrc
 
 
 # The following 4 lines are only for slurm machines. uncomment if needed.  
 export TORCH_CUDA_ARCH_LIST="6.1;6.2;7.0;7.5;8.0"   # a100: 8.0; v100: 7.0; 2080ti: 7.5; titan xp: 6.1
-# module purge
-# module load cuda/11.1.1
-# module load gcc/7.5.0
+module purge
+module load cuda/11.1.1
+module load gcc/7.5.0
 
 # download openpoints
 # git submodule add git@github.com:guochengqian/openpoints.git
 git submodule update --init --recursive
 git submodule update --remote --merge # update to the latest version
 
-# install PyTorch
+install PyTorch
 conda deactivate
 conda env remove --name openpoints
-# conda create -n openpoints -y python=3.7 numpy=1.20 numba
-# conda activate openpoints
-
-# Install Python
-RUN apt update && apt upgrade -y
-RUN apt install software-properties-common -y
-RUN apt-get install -y python3.7 \
-    && ln -s /usr/bin/python3.7 /usr/bin/python3
-RUN python3 -V
-
-RUN pip install --upgrade pip
-RUN pip install numpy==1.20 numba
+conda create -n openpoints -y python=3.7 numpy=1.20 numba
+conda activate openpoints
 
 
 # please always double check installation for pytorch and torch-scatter from the official documentation
