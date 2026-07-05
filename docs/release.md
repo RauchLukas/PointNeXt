@@ -7,14 +7,29 @@ OpenPoints and PointNeXt use separate PyPI distributions:
 - `openpoints`: the main Python library with models, datasets, layers, transforms, and training utilities.
 - `pointnext_official`: PointNeXt release helpers, checkpoint downloader, and metadata.
 
-Build and check packages locally before uploading:
+The `pointnext` PyPI name is already occupied by another project, so do not
+publish or document this release under `pip install pointnext` unless that
+project is transferred to the PointNeXt maintainers.
+
+Build and check `openpoints` first, because `pointnext_official` declares it as
+a runtime dependency:
 
 ```bash
+cd openpoints
+python -m build --sdist --wheel --no-isolation
+python -m twine check dist/*
+```
+
+Then build and check `pointnext_official` from the repository root:
+
+```bash
+cd ..
 python -m build --sdist --wheel --no-isolation
 python -m twine check dist/*
 python -m venv /tmp/pointnext-wheel-test
 /tmp/pointnext-wheel-test/bin/python -m pip install -U pip
-/tmp/pointnext-wheel-test/bin/python -m pip install dist/*.whl
+/tmp/pointnext-wheel-test/bin/python -m pip install openpoints/dist/openpoints-*.whl
+/tmp/pointnext-wheel-test/bin/python -m pip install dist/pointnext_official-*.whl
 /tmp/pointnext-wheel-test/bin/python - <<'PY'
 import pointnext_official
 from pointnext_official.checkpoints import KNOWN_CHECKPOINTS
@@ -28,6 +43,7 @@ Upload requires a maintainer-owned PyPI token:
 ```bash
 export TWINE_USERNAME=__token__
 export TWINE_PASSWORD=pypi-...
+python -m twine upload openpoints/dist/*
 python -m twine upload dist/*
 ```
 
