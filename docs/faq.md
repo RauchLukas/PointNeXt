@@ -72,6 +72,89 @@ xvfb-run -s "-screen 0 1024x768x24" python examples/segmentation/vis_results.py 
 
 If visualization still segfaults, first verify the non-visual evaluation command on the same checkpoint/config, then report the OS, GPU driver, CUDA, PyTorch, PyVista, and OpenGL/Mesa versions.
 
+## How do I save segmentation predictions as `.obj` files?
+
+For S3DIS and related segmentation scripts, add `visualize=True` to the test command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/segmentation/main.py \
+  --cfg cfgs/s3dis/pointnext-s.yaml \
+  mode=test \
+  --pretrained_path /path/to/checkpoint.pth \
+  visualize=True
+```
+
+The visualization branch is implemented in `examples/segmentation/main.py`. ScanNet test data may not contain labels, so prediction/input `.obj` files can be generated directly; ground-truth visualization requires evaluating a labeled split and using a color map whose indices match the dataset labels.
+
+## How do I train or test all S3DIS areas?
+
+The standard configs train/test one held-out area at a time through `dataset.common.test_area`. For six-fold S3DIS evaluation, run each fold/checkpoint and then aggregate with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/segmentation/test_s3dis_6fold.py \
+  --cfg cfgs/s3dis/pointnext-xl.yaml \
+  mode=test \
+  --pretrained_path pretrained/s3dis/pointnext-xl
+```
+
+## Why are validation/test results different from the automatic result after training?
+
+For S3DIS-style segmentation, validation during training is usually performed on sampled/subsampled point clouds for speed. Final test mode evaluates the full scenes with the configured voting/test pipeline. Use the standalone `mode=test --pretrained_path ...` command for the reportable number.
+
+## How do I change the optimizer in a config?
+
+Set the `optimizer` block in the YAML file or override it from the command line:
+
+```yaml
+optimizer:
+  NAME: adamw
+  weight_decay: 1.0e-4
+```
+
+Common names are defined by `openpoints/optim/optim_factory.py`.
+
+## How do I reduce S3DIS/ScanNet test memory usage?
+
+Full-scene segmentation testing can use substantially more memory than training batches. On smaller GPUs, reduce the number of votes, lower `voxel_max` for the test split, use a smaller model/config, disable visualization, and resume testing directly from the checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples/segmentation/main.py \
+  --cfg cfgs/s3dis/pointnext-s.yaml \
+  mode=test \
+  --pretrained_path /path/to/checkpoint.pth \
+  num_votes=1 \
+  visualize=False
+```
+
+## Where is the preprocessing code?
+
+Dataset preprocessing lives with the dataset loaders. Common entry points include:
+
+- S3DIS/ScanNet docs: `docs/examples/s3dis.md`, `docs/examples/scannet.md`
+- S3DIS loader/cache path: `openpoints/dataset/s3dis/s3dis.py`
+- SemanticKITTI/Semantic3D preprocessing helpers: `openpoints/dataset/semantic_kitti/utils/`
+
+Some datasets also support automatic local cache generation the first time the dataset class is instantiated.
+
+## What does `part_seg_refinement` do?
+
+`part_seg_refinement` in `examples/shapenetpart/main.py` is a ShapeNetPart post-processing step. It restricts predictions to the valid part labels for the object category, then uses nearby points to replace invalid part predictions. Final ShapeNetPart metrics are computed on the 2048 sampled test points used by the evaluation pipeline.
+
+## Are instance segmentation or custom detector backbones supported?
+
+PointNeXt/OpenPoints mainly provides classification, part segmentation, and semantic segmentation examples. Instance segmentation and detector-backbone integrations, such as replacing PointRCNN backbones, are possible research extensions but are not maintained as supported example pipelines here. When adapting PointNeXt to a new detector or dataset, tune the radius/receptive-field schedule carefully; the default segmentation radii are not guaranteed to transfer.
+
+## Where are pretrained checkpoints?
+
+Use the model-zoo docs and checkpoint helper:
+
+```bash
+pip install pointnext_official
+pointnext-download --list
+```
+
+Large checkpoint files are staged outside PyPI. If a specific checkpoint is not listed, it has not been published in the maintained release layout yet.
+
 ## `Permission denied` when running a Python file
 
 Run Python scripts through Python, not as shell executables:

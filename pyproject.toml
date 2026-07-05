@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pointnext_official"
-version = "0.1.0"
+version = "0.1.1"
 description = "PointNeXt release helpers, checkpoint download utilities, and metadata for pip-installed OpenPoints/PointNeXt users."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -24,7 +24,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "openpoints>=0.1.0",
+  "openpoints>=0.1.1",
   "huggingface_hub>=0.19",
   "PyYAML>=5.4",
 ]
