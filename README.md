@@ -90,7 +90,7 @@ source update.sh
 source install.sh
 ```
 
-If SSH is configured, `git@github.com:guochengqian/PointNeXt.git` also works. CUDA 11.3 was used for the original release. Modify `install.sh` if a different CUDA/PyTorch version is used. See [Install](docs/index.md), [FAQ](docs/faq.md), and [Checkpoints](docs/checkpoints.md) for details.
+If SSH is configured, `git@github.com:guochengqian/PointNeXt.git` also works. The current `install.sh` targets modern NVIDIA GPUs, including **Blackwell (RTX 50-series / RTX 5090, sm_120)**, via a uv + Python 3.12 environment with PyTorch ≥2.7 built for CUDA 12.8 (`cu128`). Blackwell requires CUDA ≥12.8 and PyTorch ≥2.7; the legacy CUDA 11.3 recipe (kept commented at the bottom of `install.sh`) does not run on an RTX 5090. To compile the CUDA ops you also need a matching CUDA toolkit (`nvcc`) and a host compiler the toolkit supports (CUDA 12.x needs `g++` < 14, e.g. `sudo apt install gcc-13 g++-13`). Modify `install.sh` for a different CUDA/PyTorch version. See [Install](docs/index.md), [FAQ](docs/faq.md), and [Checkpoints](docs/checkpoints.md) for details.
 
 
 
