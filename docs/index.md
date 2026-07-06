@@ -61,7 +61,7 @@ If SSH is configured, `git clone --recurse-submodules git@github.com:guochengqia
 
 Note:
 
-1) The original `install.sh` assumes CUDA 11.3-era PyTorch/CUDA settings. If another CUDA version is used, modify `install.sh` accordingly; check your CUDA version with `nvcc --version` before using the bash file.
+1) `install.sh` targets modern NVIDIA GPUs, including Blackwell (RTX 50-series / RTX 5090, `sm_120`), using a uv + Python 3.12 environment with PyTorch ≥2.7 built for CUDA 12.8 (`cu128`). Blackwell requires CUDA ≥12.8 and PyTorch ≥2.7. Compiling the CUDA ops needs a CUDA toolkit (`nvcc`, check `nvcc --version`) and a host compiler the toolkit supports (CUDA 12.x needs `g++` < 14 — install e.g. `gcc-13`/`g++-13` and set `CC`/`CXX`). If another CUDA version is used, modify `install.sh` accordingly. The legacy CUDA 11.3 recipe is kept commented at the bottom of `install.sh` for older GPUs and does not run on an RTX 5090.
 
 2) If the bash file does not work on your machine, read `install.sh` step by step and run the matching PyTorch/CUDA/operator build commands manually.
 

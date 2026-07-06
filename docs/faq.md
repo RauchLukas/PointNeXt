@@ -35,6 +35,20 @@ cd openpoints/cpp/pointops && python setup.py install && cd ../../..
 
 `chamfer_dist` and `emd` are optional for classification/segmentation and mainly needed for reconstruction/completion tasks.
 
+## How do I build the CUDA ops for an RTX 5090 / Blackwell GPU?
+
+Blackwell (`sm_120`) needs CUDA ≥12.8 and PyTorch ≥2.7. Use the default `install.sh`
+(uv + Python 3.12 + `cu128` PyTorch), and before compiling make sure:
+
+- `CUDA_HOME`/`PATH` point at a CUDA ≥12.8 toolkit (`nvcc --version`).
+- The host compiler is one the toolkit accepts — CUDA 12.x requires `g++` < 14, so
+  install e.g. `sudo apt install gcc-13 g++-13` and `export CC=gcc-13 CXX=g++-13`.
+- `TORCH_CUDA_ARCH_LIST` includes `12.0` (the default in `install.sh` does).
+
+The ops were ported to NumPy 2.x, so they compile against the NumPy that ships with
+Python 3.12 environments. `torch-scatter` (used by a few optional backbones) may need
+to compile from source since prebuilt wheels can lag new PyTorch releases.
+
 ## Can I run PointNeXt on CPU only?
 
 CPU-only import and packaging smoke tests are supported. The main PointNeXt models rely on CUDA custom ops such as ball query / grouping / pointops for practical training and evaluation, so full benchmark reproduction should be run on a CUDA GPU.
