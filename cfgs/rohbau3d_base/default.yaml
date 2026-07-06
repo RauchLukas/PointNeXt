@@ -1,0 +1,96 @@
+# data augmentation
+dataset:
+  common:
+    NAME: Rohbau3D
+    data_root: ../data/rohbau3d
+    voxel_size: 0.08
+    features: [rgb, intensity, normals]
+  train:
+    split: train
+    voxel_max: 198000
+    loop: 8  # here, the training has been looped 30 times. therefore, the training epochs do not need much.
+    presample: True
+  val:
+    split: val
+    voxel_max: 256000
+    presample: True 
+  test:
+    split: test
+    voxel_max: null
+    presample: False 
+
+no_label: False
+
+feature_keys: pos,x
+
+num_classes: 18 
+batch_size: 1
+val_batch_size: 4
+
+classes: [None, Ceiling, Slanted Ceiling, Ceiling Cutout, Floor, Wall, Drywall, Wall Cutout, Parapet, Beam, Column, Staircase, Window Cutout, Window, Door Rough Opening, Facade Element, Elevator Doors, TGA]
+
+dataloader:
+  num_workers: 4
+
+datatransforms:
+  train: [RandomRotateZ, RandomScale, ChromaticAutoContrast, RandomDropFeature, NumpyChromaticNormalize]
+  val: [NumpyChromaticNormalize] 
+  test: [PointsToTensor, NumpyChromaticNormalize] 
+  vote: [ChromaticDropGPU]
+  kwargs:
+    color_drop: 0.2
+    gravity_dim: 2
+    rotate_dim: 2
+    scale: [0.8, 1.2]
+    mirror: [0.2, -1, -1]
+    angle: 1 
+    color_mean: [0.46259782, 0.46253258, 0.46253258]  # better than not add
+    color_std: [0.693565  , 0.6852543 , 0.68061745]
+
+# ---------------------------------------------------------------------------- #
+# Training cfgs
+# ---------------------------------------------------------------------------- #
+val_fn: validate
+ignore_index: -100
+epochs: 50
+
+cls_weighed_loss: False
+criterion_args:
+  NAME: CrossEntropy
+  label_smoothing: 0.0
+  ignore_index: -100
+
+optimizer:
+ NAME: 'adamw'  # performs 1 point better than adam
+ weight_decay: 1.0e-4
+
+# lr_scheduler:
+sched: cosine
+warmup_epochs: 0
+
+min_lr: 1.0e-5 #
+lr: 0.01 # LR linear rule.
+
+grad_norm_clip: 10
+use_voting: False
+# ---------------------------------------------------------------------------- #
+# io and misc
+# ---------------------------------------------------------------------------- #
+log_dir: 'rohbau3d_v1-test'
+save_freq: -1 # save epoch every xxx epochs, -1 only save last and best. 
+val_freq: 1
+
+
+wandb:
+  project: PointNeXt-rb3d_v1-test
+  use_wandb: True
+
+
+
+save_pred: True
+
+visualize: False
+vis_pcd: True
+
+test_mode: nearest_neighbor
+test_fragments: True

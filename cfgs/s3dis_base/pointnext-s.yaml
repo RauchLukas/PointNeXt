@@ -12,7 +12,7 @@ model:
     sa_layers: 2 
     sa_use_res: True 
     width: 32
-    in_channels: 4
+    in_channels: 6
     expansion: 4
     radius: 0.1
     nsample: 32
@@ -49,7 +49,3 @@ datatransforms:
     scale: [0.9, 1.1]
     jitter_sigma: 0.005
     jitter_clip: 0.02
-
-
-
-remove_layers: [head.head.2.0, ]

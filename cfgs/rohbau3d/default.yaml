@@ -1,0 +1,95 @@
+# data augmentation
+dataset:
+  common:
+    NAME: Rohbau3D
+    data_root: ../data/rohbau3d
+    voxel_size: 0.02
+  train:
+    split: train
+    voxel_max: 64000
+    loop: 32  # here, the training has been looped 30 times. therefore, the training epochs do not need much.
+    presample: True
+  val:
+    split: val
+    voxel_max: null
+    presample: True 
+  test:
+    split: test
+    voxel_max: null
+    presample: False 
+
+no_label: False
+
+feature_keys: pos,x
+
+num_classes: 11 
+batch_size: 16
+val_batch_size: 1
+
+dataloader:
+  num_workers: 24
+
+datatransforms:
+  train: [RandomRotateZ, RandomScale, ChromaticAutoContrast, RandomDropFeature, NumpyChromaticNormalize]
+  val: [NumpyChromaticNormalize] 
+  test: [PointsToTensor, NumpyChromaticNormalize] 
+  vote: [ChromaticDropGPU]
+  kwargs:
+    color_drop: 0.2
+    gravity_dim: 2
+    rotate_dim: 2
+    scale: [0.8, 1.2]
+    mirror: [0.2, -1, -1]
+    angle: 1 
+    color_mean: [0.46259782, 0.46253258, 0.46253258]  # better than not add
+    color_std: [0.693565  , 0.6852543 , 0.68061745]
+
+# ---------------------------------------------------------------------------- #
+# Training cfgs
+# ---------------------------------------------------------------------------- #
+val_fn: validate
+ignore_index: -100
+epochs: 100
+
+cls_weighed_loss: False
+criterion_args:
+  NAME: CrossEntropy
+  label_smoothing: 0.0
+  ignore_index: -100
+
+optimizer:
+ NAME: 'adamw'  # better than adam
+ weight_decay: 1.0e-4 # better than 0.5
+
+# lr_scheduler:
+lr: 0.001
+min_lr: null
+
+sched: multistep
+decay_epochs: [70, 90]
+decay_rate: 0.1
+warmup_epochs: 0
+
+grad_norm_clip: 10
+use_voting: False
+# ---------------------------------------------------------------------------- #
+# io and misc
+# ---------------------------------------------------------------------------- #
+log_dir: 'rohbau3d'
+save_freq: -1 # save epoch every xxx epochs, -1 only save last and best. 
+val_freq: 1
+
+
+wandb:
+  project: PointNeXt-Crop
+  use_wandb: False
+
+
+
+save_pred: True
+
+visualize: False
+vis_pcd: True
+
+test_mode: nearest_neighbor
+test_fragments: True

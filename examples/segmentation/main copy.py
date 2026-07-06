@@ -23,6 +23,7 @@ from openpoints.scheduler import build_scheduler_from_cfg
 from openpoints.loss import build_criterion_from_cfg
 from openpoints.models import build_model_from_cfg
 import warnings
+from time import time 
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -56,8 +57,6 @@ def generate_data_list(cfg):
             split_no = 2
         data_list = get_semantickitti_file_list(os.path.join(cfg.dataset.common.data_root, 'sequences'),
                                                 str(cfg.dataset.test.test_id + 11))[split_no]
-    elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
-        data_list = glob.glob(os.path.join(cfg.dataset.common.data_root, cfg.dataset.test.split, "site_*", 'scene_*'))
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
     return data_list
@@ -81,60 +80,6 @@ def load_data(data_path, cfg):
         coord = load_pc_kitti(data_path[0])
         if cfg.dataset.test.split != 'test':
             label = load_label_kitti(data_path[1], remap_lut_read)
-    elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
-
-        coord = np.load(os.path.join(data_path, 'coord.npy'))
-        num_points = coord.shape[0]
-        label = np.load(os.path.join(data_path, 'class.npy'))
-
-        feat_list = []
-        feat_names = []
-        features = cfg.dataset.common.get('features', [])
-
-        if any(f.lower() in ['rgb', 'r', 'g', 'b'] for f in features if f is not None):
-            try:
-                color = np.load(os.path.join(data_path, "color.npy"))
-                if color.shape[0] != num_points:
-                    logging.error(f"[ERROR] Color length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append((color / 255.0).astype(np.float32))
-                feat_names.extend(['R', 'G', 'B'])
-            except Exception as e:
-                logging.error(f"[ERROR] Loading color in {data_path}: {e}")
-                return None, None, None
-
-        if any(f.lower() in ['intensity', 'i'] for f in features if f is not None):
-            try:
-                intensity = np.load(os.path.join(data_path, "intensity.npy"))
-                if intensity.shape[0] != num_points:
-                    logging.error(f"[ERROR] Intensity length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append(np.expand_dims(intensity, -1).astype(np.float32))
-                feat_names.append('I')
-            except Exception as e:
-                logging.error(f"[ERROR] Loading intensity in {data_path}: {e}")
-                return None, None, None
-
-        if any(f.lower() in ['normal', 'normals', 'n'] for f in features if f is not None):
-            try:
-                normal = np.load(os.path.join(data_path, "normal.npy"))
-                if normal.shape[0] != num_points:
-                    logging.error(f"[ERROR] Normal length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append(normal.astype(np.float32))
-                feat_names.extend(['Nx', 'Ny', 'Nz'])
-            except Exception as e:
-                logging.error(f"[ERROR] Loading normal in {data_path}: {e}")
-                return None, None, None
-
-        feat = np.hstack(feat_list) if feat_list else np.array([]).reshape(num_points, 0)
-
-    else:
-        raise Exception('dataset not supported yet'.format(args.data_name))
-
-    #DEBUG 
-    logging.info(f"Features loaded for {data_path}: {feat_names} with shape {feat.shape}")
-
     coord -= coord.min(0)
 
     idx_points = []
@@ -205,18 +150,18 @@ def main(gpu, cfg):
     optimizer = build_optimizer_from_cfg(model, lr=cfg.lr, **cfg.optimizer)
     scheduler = build_scheduler_from_cfg(cfg, optimizer)
 
-    # if cfg.mode == 'val':
     # build dataset
     val_loader = build_dataloader_from_cfg(cfg.get('val_batch_size', cfg.batch_size),
-                                        cfg.dataset,
-                                        cfg.dataloader,
-                                        datatransforms_cfg=cfg.datatransforms,
-                                        split='val',
-                                        distributed=cfg.distributed
-                                        )
+                                           cfg.dataset,
+                                           cfg.dataloader,
+                                           datatransforms_cfg=cfg.datatransforms,
+                                           split='val',
+                                           distributed=cfg.distributed
+                                           )
     logging.info(f"length of validation dataset: {len(val_loader.dataset)}")
     num_classes = val_loader.dataset.num_classes if hasattr(val_loader.dataset, 'num_classes') else None
     if num_classes is not None:
+        print(f"number of classes from dataset: {num_classes}")
         assert cfg.num_classes == num_classes
     logging.info(f"number of classes of the dataset: {num_classes}")
     cfg.classes = val_loader.dataset.classes if hasattr(val_loader.dataset, 'classes') else np.arange(num_classes)
@@ -321,8 +266,7 @@ def main(gpu, cfg):
 
         lr = optimizer.param_groups[0]['lr']
         logging.info(f'Epoch {epoch} LR {lr:.6f} '
-                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f} '
-                     f'train_loss {train_loss:.6f}')
+                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f}')
         if writer is not None:
             writer.add_scalar('best_val', best_val, epoch)
             writer.add_scalar('val_miou', val_miou, epoch)
@@ -400,7 +344,10 @@ def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler
     loss_meter = AverageMeter()
     cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
     model.train()  # set model to training mode
-    pbar = tqdm(enumerate(train_loader), total=train_loader.__len__())
+    if dist.get_rank() == 0:
+        pbar = tqdm(enumerate(train_loader), total=len(train_loader))
+    else:
+        pbar = enumerate(train_loader)
     num_iter = 0
     for idx, data in pbar:
         keys = data.keys() if callable(data.keys) else data.keys
@@ -418,7 +365,17 @@ def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler
         total_iter += 1 
         data['iter'] = total_iter 
         with torch.cuda.amp.autocast(enabled=cfg.use_amp):
+
+            # print(f"model input shape: pos {data['pos'].shape}, x {data['x'].shape}")  # debug
+
             logits = model(data)
+
+            # # DEBUG 
+            # print('logits shape:', logits.shape)          # [N, 18] or [B, 18, ...]
+            # print('target shape:', target.shape)
+            # print('target min/max:', target.min().item(), target.max().item())
+            # print('unique target:', torch.unique(target))
+
             loss = criterion(logits, target) if 'mask' not in cfg.criterion_args.NAME.lower() \
                 else criterion(logits, target, data['mask'])
 
@@ -448,7 +405,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler
         cm.update(logits.argmax(dim=1), target)
         loss_meter.update(loss.item())
 
-        if idx % cfg.print_freq:
+        if idx % cfg.print_freq and dist.get_rank() == 0:
             pbar.set_description(f"Train Epoch [{epoch}/{cfg.epochs}] "
                                  f"Loss {loss_meter.val:.3f} Acc {cm.overall_accuray:.2f}")
     miou, macc, oa, ious, accs = cm.all_metrics()
@@ -459,7 +416,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler
 def validate(model, val_loader, cfg, num_votes=1, data_transform=None, epoch=-1, total_iter=-1):
     model.eval()  # set model to eval mode
     cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
-    pbar = tqdm(enumerate(val_loader), total=val_loader.__len__(), desc='Val')
+
+    if dist.get_rank() == 0:
+        pbar = tqdm(enumerate(val_loader), total=val_loader.__len__(), desc='Val')
+    else:
+        pbar = enumerate(val_loader)
     for idx, data in pbar:
         keys = data.keys() if callable(data.keys) else data.keys
         for key in keys:
@@ -469,6 +430,13 @@ def validate(model, val_loader, cfg, num_votes=1, data_transform=None, epoch=-1,
         data['epoch'] = epoch
         data['iter'] = total_iter 
         logits = model(data)
+
+        # # DEBUG 
+        # print('logits shape:', logits.shape)          # [N, 18] or [B, 18, ...]
+        # print('target shape:', target.shape)
+        # print('target min/max:', target.min().item(), target.max().item())
+        # print('unique target:', torch.unique(target))
+
         if 'mask' not in cfg.criterion_args.NAME or cfg.get('use_maks', False):
             cm.update(logits.argmax(dim=1), target)
         else:
@@ -654,8 +622,6 @@ def test(model, data_list, cfg, num_votes=1):
                     data[key] = data[key].cuda(non_blocking=True)
                 data['x'] = get_features_by_keys(data, cfg.feature_keys)
                 logits = model(data)
-                # print logits shape for debug
-                logging.info(f"Logits shape: {logits.shape}")
                 """visualization in debug mode. !!! visulization is not correct, should remove ignored idx.
                 from openpoints.dataset.vis3d import vis_points, vis_multi_points
                 vis_multi_points([coord, coord_part], labels=[label.cpu().numpy(), logits.argmax(dim=1).squeeze().cpu().numpy()])
@@ -722,17 +688,6 @@ def test(model, data_list, cfg, num_votes=1):
                 save_file_name=save_file_name[0]+'_'+save_file_name[1]+'.txt'
                 save_file_name=os.path.join(cfg.save_path,save_file_name)
                 np.savetxt(save_file_name, pred, fmt="%d")
-            elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
-                pred = pred.cpu().numpy().squeeze().astype(np.uint8)
-
-                results_dir = os.path.join(cfg.run_dir, 'results')
-                os.makedirs(results_dir, exist_ok=True)
-
-                save_file_name=data_path.split('/')[-1].split('_')
-                save_file_name='sample_'+save_file_name[1]+'_pred.npy'
-
-                save_file_name = os.path.join(results_dir, save_file_name)  
-                np.save(save_file_name, pred)
 
         if label is not None:
             tp, union, count = cm.tp, cm.union, cm.count

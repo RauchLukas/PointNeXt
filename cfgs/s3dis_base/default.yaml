@@ -4,10 +4,10 @@ dataset:
     NAME: S3DIS
     data_root: ../data/S3DIS/s3disfull
     test_area: 5
-    voxel_size: 0.04
+    voxel_size: 0.02
   train:
     split: train
-    voxel_max: 24000
+    voxel_max: 192000
     loop: 30  # here, the training has been looped 30 times. therefore, the training epochs do not need much.
     presample: False
   val:
@@ -19,13 +19,13 @@ dataset:
     voxel_max: null
     presample: False 
 
-feature_keys: x,heights
+feature_keys: pos,x
 num_classes: 13
 batch_size: 32
 val_batch_size: 1
 
 dataloader:
-  num_workers: 6
+  num_workers: 12
 
 datatransforms:
   train: [ChromaticAutoContrast, PointsToTensor, PointCloudScaling, PointCloudXYZAlign, PointCloudRotation, PointCloudJitter, ChromaticDropGPU, ChromaticNormalize]
@@ -73,5 +73,5 @@ save_freq: -1 # save epoch every xxx epochs, -1 only save last and best.
 val_freq: 1
 
 wandb:
-  project: PointNeXt-S3DIS
-  use_wandb: False
+  project: PointNeXt-S3DIS-base
+  use_wandb: True

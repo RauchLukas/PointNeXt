@@ -1,0 +1,35 @@
+# FLOPs   GMACs   Params.(M)
+#  99.38   49.32   1.689
+# Throughput (ins./s): 2.445071321282616 
+model:
+  NAME: BaseSeg
+  encoder_args:
+    NAME: DeepGCN
+    in_channels: 6 
+    channels: 64
+    emb_dims: 1024
+    n_blocks: 14
+    conv: 'edge'
+    block: 'res'
+    k: 16 
+    epsilon: 0.2
+    use_stochastic: True
+    use_dilation: True 
+    norm_args: {'norm': 'bn'}
+    act_args: {'act': 'relu'}
+    is_seg: True
+  cls_args:
+    NAME: SegHead
+    num_classes: 11
+    mlps: [512, 256]
+
+
+batch_size: 3
+
+dataset:
+  train:
+    voxel_max: 24000
+    presample: True
+  val:
+    voxel_max: 64000
+    presample: True 

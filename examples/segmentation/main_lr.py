@@ -57,7 +57,7 @@ def generate_data_list(cfg):
         data_list = get_semantickitti_file_list(os.path.join(cfg.dataset.common.data_root, 'sequences'),
                                                 str(cfg.dataset.test.test_id + 11))[split_no]
     elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
-        data_list = glob.glob(os.path.join(cfg.dataset.common.data_root, cfg.dataset.test.split, "site_*", 'scene_*'))
+        data_list = glob.glob(os.path.join(cfg.dataset.common.data_root, cfg.dataset.test.split, "scan_*"))
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
     return data_list
@@ -83,57 +83,14 @@ def load_data(data_path, cfg):
             label = load_label_kitti(data_path[1], remap_lut_read)
     elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
 
-        coord = np.load(os.path.join(data_path, 'coord.npy'))
-        num_points = coord.shape[0]
-        label = np.load(os.path.join(data_path, 'class.npy'))
+        data = np.load(os.path.join(data_path, 'coord.npy'))
+        color = np.load(os.path.join(data_path, 'color.npy'))
+        label = np.load(os.path.join(data_path, 'segment.npy'))
 
-        feat_list = []
-        feat_names = []
-        features = cfg.dataset.common.get('features', [])
-
-        if any(f.lower() in ['rgb', 'r', 'g', 'b'] for f in features if f is not None):
-            try:
-                color = np.load(os.path.join(data_path, "color.npy"))
-                if color.shape[0] != num_points:
-                    logging.error(f"[ERROR] Color length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append((color / 255.0).astype(np.float32))
-                feat_names.extend(['R', 'G', 'B'])
-            except Exception as e:
-                logging.error(f"[ERROR] Loading color in {data_path}: {e}")
-                return None, None, None
-
-        if any(f.lower() in ['intensity', 'i'] for f in features if f is not None):
-            try:
-                intensity = np.load(os.path.join(data_path, "intensity.npy"))
-                if intensity.shape[0] != num_points:
-                    logging.error(f"[ERROR] Intensity length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append(np.expand_dims(intensity, -1).astype(np.float32))
-                feat_names.append('I')
-            except Exception as e:
-                logging.error(f"[ERROR] Loading intensity in {data_path}: {e}")
-                return None, None, None
-
-        if any(f.lower() in ['normal', 'normals', 'n'] for f in features if f is not None):
-            try:
-                normal = np.load(os.path.join(data_path, "normal.npy"))
-                if normal.shape[0] != num_points:
-                    logging.error(f"[ERROR] Normal length mismatch in {data_path}")
-                    return None, None, None
-                feat_list.append(normal.astype(np.float32))
-                feat_names.extend(['Nx', 'Ny', 'Nz'])
-            except Exception as e:
-                logging.error(f"[ERROR] Loading normal in {data_path}: {e}")
-                return None, None, None
-
-        feat = np.hstack(feat_list) if feat_list else np.array([]).reshape(num_points, 0)
-
+        coord = data[:, :3]
+        feat = np.clip(color / 255., 0, 1).astype(np.float32)
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
-
-    #DEBUG 
-    logging.info(f"Features loaded for {data_path}: {feat_names} with shape {feat.shape}")
 
     coord -= coord.min(0)
 
@@ -205,15 +162,14 @@ def main(gpu, cfg):
     optimizer = build_optimizer_from_cfg(model, lr=cfg.lr, **cfg.optimizer)
     scheduler = build_scheduler_from_cfg(cfg, optimizer)
 
-    # if cfg.mode == 'val':
     # build dataset
     val_loader = build_dataloader_from_cfg(cfg.get('val_batch_size', cfg.batch_size),
-                                        cfg.dataset,
-                                        cfg.dataloader,
-                                        datatransforms_cfg=cfg.datatransforms,
-                                        split='val',
-                                        distributed=cfg.distributed
-                                        )
+                                           cfg.dataset,
+                                           cfg.dataloader,
+                                           datatransforms_cfg=cfg.datatransforms,
+                                           split='val',
+                                           distributed=cfg.distributed
+                                           )
     logging.info(f"length of validation dataset: {len(val_loader.dataset)}")
     num_classes = val_loader.dataset.num_classes if hasattr(val_loader.dataset, 'num_classes') else None
     if num_classes is not None:
@@ -262,7 +218,7 @@ def main(gpu, cfg):
 
             else:
                 logging.info(f'Finetuning from {cfg.pretrained_path}')
-                load_checkpoint(model, cfg.pretrained_path, cfg.get('pretrained_module', None))
+                load_checkpoint(model, cfg.pretrained_path, cfg.get('pretrained_module', None), cfg)
     else:
         logging.info('Training from scratch')
 
@@ -321,8 +277,7 @@ def main(gpu, cfg):
 
         lr = optimizer.param_groups[0]['lr']
         logging.info(f'Epoch {epoch} LR {lr:.6f} '
-                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f} '
-                     f'train_loss {train_loss:.6f}')
+                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f}')
         if writer is not None:
             writer.add_scalar('best_val', best_val, epoch)
             writer.add_scalar('val_miou', val_miou, epoch)
@@ -512,7 +467,7 @@ def validate_sphere(model, val_loader, cfg, num_votes=1, data_transform=None, ep
     model.eval()  # set model to eval mode
     cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
     if cfg.get('visualize', False):
-        from openpoints.dataset.vis3d import write_obj
+        from openpoints.dataset.vis3d import write_obj, write_e57
         cfg.vis_dir = os.path.join(cfg.run_dir, 'visualization')
         os.makedirs(cfg.vis_dir, exist_ok=True)
         cfg.cmap = cfg.cmap.astype(np.float32) / 255.
@@ -574,6 +529,8 @@ def validate_sphere(model, val_loader, cfg, num_votes=1, data_transform=None, ep
             # output pred labels
             write_obj(coord[start_idx:end_idx], pred[start_idx:end_idx],
                         os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{dataset_name}-{idx}.obj'))
+            write_e57(coord[start_idx:end_idx], pred[start_idx:end_idx],
+                        os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{dataset_name}-{idx}.e57'))
     return miou, macc, oa, ious, accs
 
 
@@ -618,6 +575,7 @@ def test(model, data_list, cfg, num_votes=1):
         cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
         all_logits = []
         coord, feat, label, idx_points, voxel_idx, reverse_idx_part, reverse_idx  = load_data(data_path, cfg)
+        print(f'[DEBUG] Data loaded: Number of input points: {len(coord)}')
         if label is not None:
             label = torch.from_numpy(label.astype(np.int).squeeze()).cuda(non_blocking=True)
 
@@ -653,9 +611,10 @@ def test(model, data_list, cfg, num_votes=1):
                 for key in data.keys():
                     data[key] = data[key].cuda(non_blocking=True)
                 data['x'] = get_features_by_keys(data, cfg.feature_keys)
+
+                print(f"[DEBUG] Sub-cloud data prepared: Number of points: {data['pos'].shape[1]}")
+
                 logits = model(data)
-                # print logits shape for debug
-                logging.info(f"Logits shape: {logits.shape}")
                 """visualization in debug mode. !!! visulization is not correct, should remove ignored idx.
                 from openpoints.dataset.vis3d import vis_points, vis_multi_points
                 vis_multi_points([coord, coord_part], labels=[label.cpu().numpy(), logits.argmax(dim=1).squeeze().cpu().numpy()])
@@ -684,7 +643,7 @@ def test(model, data_list, cfg, num_votes=1):
             gt = label.cpu().numpy().squeeze() if label is not None else None
             pred = pred.cpu().numpy().squeeze()
             gt = cfg.cmap[gt, :] if gt is not None else None
-            pred = cfg.cmap[pred, :]
+            pred_rgb = cfg.cmap[pred, :]
             # output pred labels
             if 's3dis' in dataset_name:
                 file_name = f'{dataset_name}-Area{cfg.dataset.common.test_area}-{cloud_idx}'
@@ -698,8 +657,9 @@ def test(model, data_list, cfg, num_votes=1):
                 write_obj(coord, gt,
                         os.path.join(cfg.vis_dir, f'gt-{file_name}.obj'))
             # output pred labels
-            write_obj(coord, pred,
+            write_obj(coord, pred_rgb,
                       os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{file_name}.obj'))
+            
 
         if cfg.get('save_pred', False):
             if 'semantickitti' in cfg.dataset.common.NAME.lower():

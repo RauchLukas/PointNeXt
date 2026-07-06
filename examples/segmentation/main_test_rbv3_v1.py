@@ -24,6 +24,12 @@ from openpoints.loss import build_criterion_from_cfg
 from openpoints.models import build_model_from_cfg
 import warnings
 
+from typing import Optional
+try:
+    from scipy.spatial import cKDTree as KDTree
+except ImportError:  # fallback (slower)
+    KDTree = None
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
@@ -61,6 +67,157 @@ def generate_data_list(cfg):
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
     return data_list
+
+
+
+# FARTHEST-POINT SAMPLING BASED FRAGMENTS
+class FragmentSampler:
+    def __init__(
+        self,
+        pointcloud: np.ndarray,
+        idx: Optional[np.ndarray] = None,
+        num_fragment_points: int = 32768,
+        seed: int = 0,
+    ) -> None:
+        self.base_points = np.asarray(pointcloud, dtype=np.float32)
+        self.selection_idx = (
+            np.arange(self.base_points.shape[0], dtype=np.int64)
+            if idx is None else np.asarray(idx, dtype=np.int64)
+        )
+        self.points = self.base_points[self.selection_idx]  # local cloud
+        self.k = int(num_fragment_points)
+        self.rng = np.random.default_rng(seed)
+
+        self._included_pts = np.zeros(self.base_points.shape[0], dtype=bool)
+        self.fragments: list[np.ndarray] = []
+        self.fragment_center: list[np.ndarray] = []
+        self.fragment_radius: list[float] = []
+
+    def build(self):
+        self.fragments.clear()
+        self.fragment_center.clear()
+        self.fragment_radius.clear()
+        self._included_pts[:] = False
+
+        if self.points.shape[0] == 0:
+            return self.fragments, self.fragment_center, self.fragment_radius
+
+        self._build_coverage_fps()
+        return self.fragments, self.fragment_center, self.fragment_radius
+
+    def _build_coverage_fps(
+        self,
+        max_fragments: Optional[int] = None,
+        candidate_size: Optional[int] = 200_000,
+        refresh_every: Optional[int] = 25,
+        start: Optional[str] = "random",  # "random" or "farthest_from_centroid"
+    ):
+        """
+        Coverage-driven centers:
+        - pick a center (farthest-point on a candidate subset)
+        - take kNN fragment around it
+        - mark those k points as covered
+        - repeat until all covered
+
+        candidate_size controls speed vs quality; larger tends to reduce #fragments.
+        """
+
+        coord = self.points
+        n = coord.shape[0]
+        k = min(self.k, n)
+
+        if KDTree is None:
+            raise ImportError("scipy is required for fast coverage-driven sampling (cKDTree).")
+
+        tree = KDTree(coord)
+
+        uncovered = np.ones(n, dtype=bool)
+
+        centers_local_idx: list[int] = []
+
+        # --- helper: (re)draw candidate set (prefer uncovered points) ---
+        def draw_candidates() -> np.ndarray:
+            u = np.flatnonzero(uncovered)
+            if u.size == 0:
+                return u
+            m = min(candidate_size, u.size)
+            return self.rng.choice(u, size=m, replace=False)
+
+        # --- initialize candidates + their min distance to selected centers ---
+        cand = draw_candidates()
+        cand_min_d2 = np.full(cand.shape[0], np.inf, dtype=np.float32)
+
+        # pick first center
+        if start == "farthest_from_centroid" and cand.size > 0:
+            centroid = coord.mean(axis=0, dtype=np.float32)
+            d2 = np.sum((coord[cand] - centroid) ** 2, axis=1)
+            first = int(cand[np.argmax(d2)])
+        else:
+            # random uncovered
+            u = np.flatnonzero(uncovered)
+            first = int(u[self.rng.integers(0, u.size)])
+
+        it = 0
+        while uncovered.any():
+            if max_fragments is not None and len(centers_local_idx) >= max_fragments:
+                break
+
+            # choose next center:
+            if len(centers_local_idx) == 0:
+                c_idx = first
+            else:
+                # ensure we have some uncovered candidates; refresh if needed
+                if cand.size == 0 or not uncovered[cand].any() or (it % refresh_every == 0):
+                    cand = draw_candidates()
+                    cand_min_d2 = np.full(cand.shape[0], np.inf, dtype=np.float32)
+                    # recompute min distances to existing centers for new cand set
+                    if cand.size > 0 and centers_local_idx:
+                        C = coord[np.asarray(centers_local_idx, dtype=np.int64)]
+                        # (M,3) vs (J,3) -> (M,J) squared distances (vectorized)
+                        # keep this moderate by candidate_size
+                        diff = coord[cand][:, None, :] - C[None, :, :]
+                        cand_min_d2 = np.min(np.sum(diff * diff, axis=2), axis=1).astype(np.float32)
+
+                # among uncovered candidates, pick farthest from existing centers
+                mask = uncovered[cand]
+                if not np.any(mask):
+                    # fallback: pick any uncovered point
+                    u = np.flatnonzero(uncovered)
+                    c_idx = int(u[self.rng.integers(0, u.size)])
+                else:
+                    sel = np.argmax(np.where(mask, cand_min_d2, -1.0))
+                    c_idx = int(cand[sel])
+
+            center = coord[c_idx]
+
+            # kNN fragment around center (parallel)
+            dists, nn = tree.query(center, k=k, workers=-1)
+            if k == 1:
+                nn = np.asarray([nn], dtype=np.int64)
+                dists = np.asarray([dists], dtype=np.float32)
+            else:
+                nn = nn.astype(np.int64, copy=False)
+                dists = dists.astype(np.float32, copy=False)
+
+            # record fragment as GLOBAL indices into base_points
+            frag_global = self.selection_idx[nn]
+            self.fragments.append(frag_global.copy())
+            self.fragment_center.append(center.copy())
+            self.fragment_radius.append(float(np.max(dists)))
+
+            # mark covered
+            uncovered[nn] = False
+            self._included_pts[frag_global] = True
+
+            # update candidate min distances wrt this new center (cheap, vectorized)
+            if cand.size > 0:
+                diff = coord[cand] - center
+                d2_new = np.sum(diff * diff, axis=1).astype(np.float32)
+                cand_min_d2 = np.minimum(cand_min_d2, d2_new)
+
+            centers_local_idx.append(c_idx)
+            it += 1
+
 
 
 def load_data(data_path, cfg):
@@ -132,12 +289,10 @@ def load_data(data_path, cfg):
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
 
-    #DEBUG 
-    logging.info(f"Features loaded for {data_path}: {feat_names} with shape {feat.shape}")
-
     coord -= coord.min(0)
 
     idx_points = []
+    debug_idx_points = []
     voxel_idx, reverse_idx_part,reverse_idx_sort = None, None, None
     voxel_size = cfg.dataset.common.get('voxel_size', None)
 
@@ -146,16 +301,92 @@ def load_data(data_path, cfg):
         # voxel_idx: Voxel NO. for the sorted points
         idx_sort, voxel_idx, count = voxelize(coord, voxel_size, mode=1)
         if cfg.get('test_mode', 'multi_voxel') == 'nearest_neighbor':
-            idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + np.random.randint(0, count.max(), count.size) % count
+            idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + np.random.randint(0, count.max(), count.size) % count # select a random point per voxel
             idx_part = idx_sort[idx_select]
+            print(f"[DEBUG] num points in subcloud: {len(idx_part)}" )
             npoints_subcloud = voxel_idx.max()+1
             idx_shuffle = np.random.permutation(npoints_subcloud)
             idx_part = idx_part[idx_shuffle] # idx_part: randomly sampled points of a voxel
             reverse_idx_part = np.argsort(idx_shuffle, axis=0) # revevers idx_part to sorted
-            idx_points.append(idx_part)
             reverse_idx_sort = np.argsort(idx_sort, axis=0)
+            print(f"[DEBUG] len reverse_idx_part: {len(reverse_idx_part)}, len reverse_idx_sort: {len(reverse_idx_sort)}")
+
+            # if not cfg.get('test_fragments', False) == 'fragments':
+            #     idx_points.append(idx_part)
+
+
+            # else:
+            fragment_points = 1_024_000
+
+
+            sampler = FragmentSampler(
+                pointcloud=coord,
+                idx=idx_part,
+                num_fragment_points=fragment_points,
+            )
+
+            idx_points, fragment_centers, fragment_radii = sampler.build()
+
+
+            # num_fragments = int(np.ceil(len(idx_part) / fragment_points))
+            # print(f"[DEBUG] num fragments: {num_fragments}, total points: {len(coord)}" )
+
+            # for i in range(num_fragments):
+            #     print(f'[DEBUG] Sampling fragment {i+1}/{num_fragments}', end='\r')
+            #     start_idx = i * fragment_points
+            #     end_idx = min((i + 1) * fragment_points, len(idx_part))
+            #     fragment_coord = idx_part[start_idx:end_idx]   
+            #     idx_points.append(fragment_coord)
+
+            # # checkt that all indexes are at least covered once
+            # unique_covered_points = np.unique(np.concatenate(idx_points))
+            # print(f'[DEBUG] Total number of unique covered points: {len(unique_covered_points)} / {len(idx_part)}')
+            # if len(unique_covered_points) < len(idx_part):
+            #     assert False, f"Some points are not covered in fragments!"
+
+
+            # NxNy = np.floor(0.8 * np.sqrt(fragment_points)).astype(np.int32)
+
+            # # search_radius = 
+            # coord_part = coord[idx_part]
+
+            # # voxelize part cloud 
+            # voxel_size = voxel_size * NxNy
+
+            # # Calculate voxel coordinates for each point
+            # voxel_coords = np.floor(coord_part / voxel_size).astype(int)
+
+            # # Find unique voxel coordinates (occupied voxels)
+            # unique_voxel_coords, inverse_indices = np.unique(voxel_coords, axis=0, return_inverse=True)
+
+            # # Calculate the center of each unique occupied voxel
+            # # The center is the integer voxel coordinate multiplied by voxel_size, plus half the voxel_size
+            # voxel_centers = (unique_voxel_coords * voxel_size) + (voxel_size / 2)
+
+            # for i in range(len(voxel_centers)):
+            #     print(f'[DEBUG] Sampling fragment {i}/{len(voxel_centers)}', end='\r')
+            #     center = voxel_centers[i]
+            #     # find the indexes of the n = fragment_points nearest points to the center
+            #     dists = np.linalg.norm(coord_part - center, axis=1)
+            #     idx_nearest = np.argsort(dists)[:fragment_points]
+            #     idx_points.append(idx_part[idx_nearest])
+
+            # # check if all points are covered
+            # unique_covered_points = np.unique(np.concatenate(idx_points))
+
+            # # assert np.all(unique_covered_points == np.sort(idx_part)), \
+            # #     f"Some points are not covered in fragments!"
+            # print(f'[DEBUG] Total number of unique covered points: {len(unique_covered_points)} / {len(idx_part)}')
+            # if len(unique_covered_points) < len(idx_part):
+            #     print(f'[DEBUG] Number of uncovered points: {len(idx_part) - len(unique_covered_points)}')
+            #     missing_points = np.setdiff1d(idx_part, unique_covered_points)
+            #     print(f'[DEBUG] Uncovered point indices: {len(missing_points)}: {missing_points}')
+            #     print(f'[DEBUG] Uncovered point indices: {len(np.setdiff1d(idx_part, reverse_idx_sort))}: {np.setdiff1d(idx_part, reverse_idx_sort)}')
+
+            # pass
         else:
             for i in range(count.max()):
+                print(f'[DEBUG] Sampling voxel pass {i}/{count.max()}', end='\r')
                 idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + i % count
                 idx_part = idx_sort[idx_select]
                 np.random.shuffle(idx_part)
@@ -205,15 +436,14 @@ def main(gpu, cfg):
     optimizer = build_optimizer_from_cfg(model, lr=cfg.lr, **cfg.optimizer)
     scheduler = build_scheduler_from_cfg(cfg, optimizer)
 
-    # if cfg.mode == 'val':
     # build dataset
     val_loader = build_dataloader_from_cfg(cfg.get('val_batch_size', cfg.batch_size),
-                                        cfg.dataset,
-                                        cfg.dataloader,
-                                        datatransforms_cfg=cfg.datatransforms,
-                                        split='val',
-                                        distributed=cfg.distributed
-                                        )
+                                           cfg.dataset,
+                                           cfg.dataloader,
+                                           datatransforms_cfg=cfg.datatransforms,
+                                           split='val',
+                                           distributed=cfg.distributed
+                                           )
     logging.info(f"length of validation dataset: {len(val_loader.dataset)}")
     num_classes = val_loader.dataset.num_classes if hasattr(val_loader.dataset, 'num_classes') else None
     if num_classes is not None:
@@ -321,8 +551,7 @@ def main(gpu, cfg):
 
         lr = optimizer.param_groups[0]['lr']
         logging.info(f'Epoch {epoch} LR {lr:.6f} '
-                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f} '
-                     f'train_loss {train_loss:.6f}')
+                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f}')
         if writer is not None:
             writer.add_scalar('best_val', best_val, epoch)
             writer.add_scalar('val_miou', val_miou, epoch)
@@ -512,7 +741,7 @@ def validate_sphere(model, val_loader, cfg, num_votes=1, data_transform=None, ep
     model.eval()  # set model to eval mode
     cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
     if cfg.get('visualize', False):
-        from openpoints.dataset.vis3d import write_obj
+        from openpoints.dataset.vis3d import write_obj, write_e57
         cfg.vis_dir = os.path.join(cfg.run_dir, 'visualization')
         os.makedirs(cfg.vis_dir, exist_ok=True)
         cfg.cmap = cfg.cmap.astype(np.float32) / 255.
@@ -574,6 +803,8 @@ def validate_sphere(model, val_loader, cfg, num_votes=1, data_transform=None, ep
             # output pred labels
             write_obj(coord[start_idx:end_idx], pred[start_idx:end_idx],
                         os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{dataset_name}-{idx}.obj'))
+            write_e57(coord[start_idx:end_idx], pred[start_idx:end_idx],
+                        os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{dataset_name}-{idx}.e57'))
     return miou, macc, oa, ious, accs
 
 
@@ -618,14 +849,19 @@ def test(model, data_list, cfg, num_votes=1):
         cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
         all_logits = []
         coord, feat, label, idx_points, voxel_idx, reverse_idx_part, reverse_idx  = load_data(data_path, cfg)
+        print(f'[DEBUG] Data loaded: Number of input points: {len(coord)}')
         if label is not None:
             label = torch.from_numpy(label.astype(np.int).squeeze()).cuda(non_blocking=True)
+
+        # Create an array to store the prediction for each unique voxel ID
+        num_voxels = voxel_idx.max() + 1
+        voxel_predictions_map = np.zeros((num_voxels, cfg.num_classes), dtype=np.int64)
 
         len_part = len(idx_points)
         nearest_neighbor = len_part == 1
         pbar = tqdm(range(len(idx_points)))
         for idx_subcloud in pbar:
-            pbar.set_description(f"Test on {cloud_idx}-th cloud [{idx_subcloud}]/[{len_part}]]")
+            pbar.set_description(f"Test on {cloud_idx}-th cloud [{idx_subcloud+1}]/[{len_part}] with {len(idx_points[idx_subcloud])} fragment points")
             if not (nearest_neighbor and idx_subcloud>0):
                 idx_part = idx_points[idx_subcloud]
                 coord_part = coord[idx_part]
@@ -647,33 +883,63 @@ def test(model, data_list, cfg, num_votes=1):
                         data['x'] = data['x'].unsqueeze(0)
                     data['pos'] = data['pos'].unsqueeze(0)
                 else:
-                    data['o'] = torch.IntTensor([len(coord)])
-                    data['batch'] = torch.LongTensor([0] * len(coord))
+                    data['o'] = torch.IntTensor([len(coord_part)])
+                    data['batch'] = torch.LongTensor([0] * len(coord_part))
 
                 for key in data.keys():
                     data[key] = data[key].cuda(non_blocking=True)
                 data['x'] = get_features_by_keys(data, cfg.feature_keys)
+
                 logits = model(data)
-                # print logits shape for debug
-                logging.info(f"Logits shape: {logits.shape}")
-                """visualization in debug mode. !!! visulization is not correct, should remove ignored idx.
-                from openpoints.dataset.vis3d import vis_points, vis_multi_points
-                vis_multi_points([coord, coord_part], labels=[label.cpu().numpy(), logits.argmax(dim=1).squeeze().cpu().numpy()])
-                """
+        #         """visualization in debug mode. !!! visulization is not correct, should remove ignored idx.
+        #         from openpoints.dataset.vis3d import vis_points, vis_multi_points
+        #         vis_multi_points([coord, coord_part], labels=[label.cpu().numpy(), logits.argmax(dim=1).squeeze().cpu().numpy()])
+        #         """
+        #         print("[DEBUG] logits shape:", logits.shape)
 
-            all_logits.append(logits)
-        all_logits = torch.cat(all_logits, dim=0)
-        if not cfg.dataset.common.get('variable', False):
-            all_logits = all_logits.transpose(1, 2).reshape(-1, cfg.num_classes)
+        #         logits = logits.squeeze(0)                   # [C, N]  -> [11, 47524]
+        #         pred = logits.argmax(dim=0)                  # [N]     -> [47524]
 
-        if not nearest_neighbor:
-            # average merge overlapped multi voxels logits to original point set
-            idx_points = torch.from_numpy(np.hstack(idx_points)).cuda(non_blocking=True)
-            all_logits = scatter(all_logits, idx_points, dim=0, reduce='mean')
-        else:
-            # interpolate logits by nearest neighbor
-            all_logits = all_logits[reverse_idx_part][voxel_idx][reverse_idx]
-        pred = all_logits.argmax(dim=1)
+        #         pred = pred.detach().cpu().numpy().astype(np.int64)
+        #         idx_np = np.asarray(idx_part, dtype=np.int64)  # [N]
+
+        #         # correct accumulation for overlaps / duplicates
+        #         np.add.at(counts, (idx_np, pred), 1)
+
+        #         print("[DEBUG] firtst 10 points votes counts:", counts[:10])
+
+        #     all_logits.append(logits)
+        # all_logits = torch.cat(all_logits, dim=0)
+        # if not cfg.dataset.common.get('variable', False):
+        #     all_logits = all_logits.transpose(1, 2).reshape(-1, cfg.num_classes)
+
+        # if not nearest_neighbor:
+        #     # average merge overlapped multi voxels logits to original point set
+        #     idx_points = torch.from_numpy(np.hstack(idx_points)).cuda(non_blocking=True)
+        #     all_logits = scatter(all_logits, idx_points, dim=0, reduce='mean')
+        # else:
+        #     # interpolate logits by nearest neighbor
+        #     all_logits = all_logits[reverse_idx_part][voxel_idx][reverse_idx]
+
+
+        pred_for_representative_points_shuffled = logits.squeeze(0).argmax(dim=0).detach().cpu().numpy().astype(np.int64)
+
+        # Get the voxel IDs for these representative points from the current fragment
+        voxel_ids_for_shuffled_points = voxel_idx[reverse_idx[idx_part]]
+
+        np.add.at(voxel_predictions_map, (voxel_ids_for_shuffled_points, pred_for_representative_points_shuffled), 1)
+
+        voxel_predictions_map = np.argmax(voxel_predictions_map, axis=1)
+
+        predicted_classes_for_all_original_points = voxel_predictions_map[voxel_idx[reverse_idx]]
+
+        pred = predicted_classes_for_all_original_points.astype(np.int64)
+        # send pred to gpu for cm update
+        pred = torch.from_numpy(pred).cuda(non_blocking=True)
+
+        print("[DEBUG] Prdeiction shape:", pred.shape   )
+
+        # pred = all_logits.argmax(dim=1)
         if label is not None:
             cm.update(pred, label)
         """visualization in debug mode
@@ -684,7 +950,7 @@ def test(model, data_list, cfg, num_votes=1):
             gt = label.cpu().numpy().squeeze() if label is not None else None
             pred = pred.cpu().numpy().squeeze()
             gt = cfg.cmap[gt, :] if gt is not None else None
-            pred = cfg.cmap[pred, :]
+            pred_rgb = cfg.cmap[pred, :]
             # output pred labels
             if 's3dis' in dataset_name:
                 file_name = f'{dataset_name}-Area{cfg.dataset.common.test_area}-{cloud_idx}'
@@ -698,8 +964,9 @@ def test(model, data_list, cfg, num_votes=1):
                 write_obj(coord, gt,
                         os.path.join(cfg.vis_dir, f'gt-{file_name}.obj'))
             # output pred labels
-            write_obj(coord, pred,
+            write_obj(coord, pred_rgb,
                       os.path.join(cfg.vis_dir, f'{cfg.cfg_basename}-{file_name}.obj'))
+            
 
         if cfg.get('save_pred', False):
             if 'semantickitti' in cfg.dataset.common.NAME.lower():

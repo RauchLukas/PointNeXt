@@ -1,9 +1,8 @@
 # data augmentation
 dataset:
   common:
-    NAME: S3DIS
-    data_root: ../data/S3DIS/s3disfull
-    test_area: 5
+    NAME: Rohbau3D
+    data_root: ../data/rohbau3d
     voxel_size: 0.04
   train:
     split: train
@@ -20,12 +19,13 @@ dataset:
     presample: False 
 
 feature_keys: x,heights
-num_classes: 13
+num_classes: 11 
+
 batch_size: 32
 val_batch_size: 1
 
 dataloader:
-  num_workers: 6
+  num_workers: 12
 
 datatransforms:
   train: [ChromaticAutoContrast, PointsToTensor, PointCloudScaling, PointCloudXYZAlign, PointCloudRotation, PointCloudJitter, ChromaticDropGPU, ChromaticNormalize]
@@ -68,10 +68,19 @@ use_voting: False
 # ---------------------------------------------------------------------------- #
 # io and misc
 # ---------------------------------------------------------------------------- #
-log_dir: 's3dis'
+log_dir: 'rohbau3d'
 save_freq: -1 # save epoch every xxx epochs, -1 only save last and best. 
 val_freq: 1
 
+
 wandb:
-  project: PointNeXt-S3DIS
+  project: PointNeXt-Crop
   use_wandb: False
+
+save_pred: True
+
+visualize: False
+vis_pcd: True
+
+test_mode: nearest_neighbor
+test_fragments: True
