@@ -53,9 +53,11 @@ OVERRIDE_PATHS = {
     "lr": ["lr"],
     "weight_decay": ["optimizer", "weight_decay"],
     "batch_size": ["batch_size"],
+    "val_batch_size": ["val_batch_size"],
     "loop": ["dataset", "train", "loop"],
     "voxel_size": ["dataset", "common", "voxel_size"],
     "voxel_max": ["dataset", "train", "voxel_max"],
+    "val_voxel_max": ["dataset", "val", "voxel_max"],
     "wandb_project": ["wandb", "project"],
     "seed": ["seed"],
     "epochs": ["epochs"],
@@ -76,6 +78,7 @@ LR_PHASE = dict(
         loop=4,
         voxel_size=0.08,
         voxel_max=96000,
+        val_voxel_max=None,  # null = full scene; set e.g. 256000 to cap val memory
         seed=42,
         deterministic=True,
         use_amp=False,
@@ -106,11 +109,13 @@ MAIN_PHASE = dict(
         metric_fraction=True,
         log_dir="rohbau3d_hp_main",
         epochs=50,
+        val_voxel_max=256000,
     ),
     grid=dict(
         batch_size=[1],
         voxel_size=[0.08],
         voxel_max=[198000],
+        # val_voxel_max=[None, 256000],  # optional: sweep val point cap
         loop=[8, 16],
         wandb_project=["PointNeXt-rb3d_hp_main"],
     ),
@@ -128,6 +133,7 @@ REPEAT_PHASE = dict(
         loop=2,
         voxel_size=0.08,
         voxel_max=48000,
+        val_voxel_max=None,  # full-scene val for determinism repeat study
         lr=0.01,
         weight_decay=0.0001,
         seed=42,
@@ -184,8 +190,10 @@ def apply_overrides(cfg, overrides):
     cfg.setdefault("metric_fraction", True)
     cfg.setdefault("wandb", {})
     cfg["wandb"]["use_wandb"] = True
-    cfg.setdefault("dataset", {}).setdefault("val", {})["voxel_max"] = None
     cfg.setdefault("dataset", {}).setdefault("test", {})["voxel_max"] = None
+    if "val_voxel_max" not in overrides:
+        cfg.setdefault("dataset", {}).setdefault("val", {})["voxel_max"] = None
+    cfg["val_batch_size"] = 1  # variable point counts per scene — must not batch >1
     cfg["world_size"] = NUM_GPU
     cfg["ngpus_per_node"] = NUM_GPU
     cfg["multiprocessing_distributed"] = NUM_GPU > 1
@@ -193,6 +201,8 @@ def apply_overrides(cfg, overrides):
 
 
 def _tag(value):
+    if value is None:
+        return "null"
     return str(value).replace(".", "p").replace("-", "m")
 
 

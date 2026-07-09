@@ -25,7 +25,7 @@ feature_keys: pos,x
 
 num_classes: 18 
 batch_size: 1
-val_batch_size: 4
+val_batch_size: 1
 
 classes: [None, Ceiling, Slanted Ceiling, Ceiling Cutout, Floor, Wall, Drywall, Wall Cutout, Parapet, Beam, Column, Staircase, Window Cutout, Window, Door Rough Opening, Facade Element, Elevator Doors, TGA]
 
