@@ -27,11 +27,35 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
+class RollingAverage:
+    """Running mean over the last `window` values."""
+
+    def __init__(self, window=3):
+        self.window = window
+        self.values = []
+
+    def update(self, value):
+        self.values.append(value)
+        if len(self.values) > self.window:
+            self.values.pop(0)
+        return sum(self.values) / len(self.values)
+
+
+def metric_scale(cfg):
+    return 0.01 if cfg.get('metric_fraction', False) else 1.0
+
+
+def format_metric(value, cfg, precision=4):
+    return value * metric_scale(cfg), precision if cfg.get('metric_fraction', False) else 2
+
+
 def write_to_csv(oa, macc, miou, ious, best_epoch, cfg, write_header=True, area=5):
-    ious_table = [f'{item:.2f}' for item in ious]
+    scale = metric_scale(cfg)
+    prec = 4 if cfg.get('metric_fraction', False) else 2
+    ious_table = [f'{item * scale:.{prec}f}' for item in ious]
     header = ['method', 'Area', 'OA', 'mACC', 'mIoU'] + cfg.classes + ['best_epoch', 'log_path', 'wandb link']
-    data = [cfg.cfg_basename, str(area), f'{oa:.2f}', f'{macc:.2f}',
-            f'{miou:.2f}'] + ious_table + [str(best_epoch), cfg.run_dir,
+    data = [cfg.cfg_basename, str(area), f'{oa * scale:.{prec}f}', f'{macc * scale:.{prec}f}',
+            f'{miou * scale:.{prec}f}'] + ious_table + [str(best_epoch), cfg.run_dir,
                                            wandb.run.get_url() if cfg.wandb.use_wandb else '-']
     with open(cfg.csv_path, 'a', encoding='UTF8', newline='') as f:
         writer = csv.writer(f)
@@ -57,7 +81,7 @@ def generate_data_list(cfg):
         data_list = get_semantickitti_file_list(os.path.join(cfg.dataset.common.data_root, 'sequences'),
                                                 str(cfg.dataset.test.test_id + 11))[split_no]
     elif 'rohbau3d' in cfg.dataset.common.NAME.lower():
-        data_list = glob.glob(os.path.join(cfg.dataset.common.data_root, cfg.dataset.test.split, "site_*", 'scene_*'))
+        data_list = sorted(glob.glob(os.path.join(cfg.dataset.common.data_root, cfg.dataset.test.split, "site_*", 'scene_*')))
     else:
         raise Exception('dataset not supported yet'.format(args.data_name))
     return data_list
@@ -146,10 +170,16 @@ def load_data(data_path, cfg):
         # voxel_idx: Voxel NO. for the sorted points
         idx_sort, voxel_idx, count = voxelize(coord, voxel_size, mode=1)
         if cfg.get('test_mode', 'multi_voxel') == 'nearest_neighbor':
-            idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + np.random.randint(0, count.max(), count.size) % count
+            if cfg.get('deterministic', False):
+                idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1])
+            else:
+                idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + np.random.randint(0, count.max(), count.size) % count
             idx_part = idx_sort[idx_select]
             npoints_subcloud = voxel_idx.max()+1
-            idx_shuffle = np.random.permutation(npoints_subcloud)
+            if cfg.get('deterministic', False):
+                idx_shuffle = np.arange(npoints_subcloud)
+            else:
+                idx_shuffle = np.random.permutation(npoints_subcloud)
             idx_part = idx_part[idx_shuffle] # idx_part: randomly sampled points of a voxel
             reverse_idx_part = np.argsort(idx_shuffle, axis=0) # revevers idx_part to sorted
             idx_points.append(idx_part)
@@ -212,7 +242,8 @@ def main(gpu, cfg):
                                         cfg.dataloader,
                                         datatransforms_cfg=cfg.datatransforms,
                                         split='val',
-                                        distributed=cfg.distributed
+                                        distributed=cfg.distributed,
+                                        seed=cfg.seed,
                                         )
     logging.info(f"length of validation dataset: {len(val_loader.dataset)}")
     num_classes = val_loader.dataset.num_classes if hasattr(val_loader.dataset, 'num_classes') else None
@@ -276,6 +307,7 @@ def main(gpu, cfg):
                                              datatransforms_cfg=cfg.datatransforms,
                                              split='train',
                                              distributed=cfg.distributed,
+                                             seed=cfg.seed,
                                              )
     logging.info(f"length of training dataset: {len(train_loader.dataset)}")
 
@@ -295,6 +327,8 @@ def main(gpu, cfg):
 
     val_miou, val_macc, val_oa, val_ious, val_accs = 0., 0., 0., [], []
     best_val, macc_when_best, oa_when_best, ious_when_best, best_epoch = 0., 0., 0., [], 0
+    train_miou_ma = RollingAverage(window=3)
+    val_miou_ma = RollingAverage(window=3)
     total_iter = 0
     for epoch in range(cfg.start_epoch, cfg.epochs + 1):
         if cfg.distributed:
@@ -315,24 +349,37 @@ def main(gpu, cfg):
                 ious_when_best = val_ious
                 best_epoch = epoch
                 with np.printoptions(precision=2, suppress=True):
+                    best_miou, best_prec = format_metric(val_miou, cfg)
+                    best_macc, _ = format_metric(macc_when_best, cfg)
+                    best_oa, _ = format_metric(oa_when_best, cfg)
                     logging.info(
-                        f'Find a better ckpt @E{epoch}, val_miou {val_miou:.2f} val_macc {macc_when_best:.2f}, val_oa {oa_when_best:.2f}'
+                        f'Find a better ckpt @E{epoch}, val_miou {best_miou:.{best_prec}f} '
+                        f'val_macc {best_macc:.{best_prec}f}, val_oa {best_oa:.{best_prec}f}'
                         f'\nmious: {val_ious}')
 
         lr = optimizer.param_groups[0]['lr']
-        logging.info(f'Epoch {epoch} LR {lr:.6f} '
-                     f'train_miou {train_miou:.2f}, val_miou {val_miou:.2f}, best val miou {best_val:.2f} '
-                     f'train_loss {train_loss:.6f}')
+        scale = metric_scale(cfg)
+        prec = 4 if cfg.get('metric_fraction', False) else 2
+        train_miou_ma3 = train_miou_ma.update(train_miou)
+        val_miou_ma3 = val_miou_ma.update(val_miou)
+        logging.info(
+            f'Epoch {epoch} LR {lr:.6f} '
+            f'train_miou {train_miou * scale:.{prec}f}, val_miou {val_miou * scale:.{prec}f}, '
+            f'best val miou {best_val * scale:.{prec}f} '
+            f'train_miou_ma3 {train_miou_ma3 * scale:.{prec}f}, val_miou_ma3 {val_miou_ma3 * scale:.{prec}f} '
+            f'train_loss {train_loss:.6f}')
         if writer is not None:
-            writer.add_scalar('best_val', best_val, epoch)
-            writer.add_scalar('val_miou', val_miou, epoch)
-            writer.add_scalar('macc_when_best', macc_when_best, epoch)
-            writer.add_scalar('oa_when_best', oa_when_best, epoch)
-            writer.add_scalar('val_macc', val_macc, epoch)
-            writer.add_scalar('val_oa', val_oa, epoch)
+            writer.add_scalar('best_val', best_val * scale, epoch)
+            writer.add_scalar('val_miou', val_miou * scale, epoch)
+            writer.add_scalar('val_miou_ma3', val_miou_ma3 * scale, epoch)
+            writer.add_scalar('macc_when_best', macc_when_best * scale, epoch)
+            writer.add_scalar('oa_when_best', oa_when_best * scale, epoch)
+            writer.add_scalar('val_macc', val_macc * scale, epoch)
+            writer.add_scalar('val_oa', val_oa * scale, epoch)
             writer.add_scalar('train_loss', train_loss, epoch)
-            writer.add_scalar('train_miou', train_miou, epoch)
-            writer.add_scalar('train_macc', train_macc, epoch)
+            writer.add_scalar('train_miou', train_miou * scale, epoch)
+            writer.add_scalar('train_miou_ma3', train_miou_ma3 * scale, epoch)
+            writer.add_scalar('train_macc', train_macc * scale, epoch)
             writer.add_scalar('lr', lr, epoch)
 
         if cfg.sched_on_epoch:
@@ -392,8 +439,8 @@ def main(gpu, cfg):
         logging.warning('Testing using multiple GPUs is not allowed for now. Running testing after this training is required.')
     if writer is not None:
         writer.close()
-    # dist.destroy_process_group() # comment this line due to https://github.com/guochengqian/PointNeXt/issues/95
-    wandb.finish(exit_code=True)
+    if cfg.wandb.use_wandb:
+        wandb.finish(exit_code=True)
 
 
 def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, epoch, total_iter, cfg):
@@ -591,7 +638,7 @@ def test(model, data_list, cfg, num_votes=1):
     """
     model.eval()  # set model to eval mode
     all_cm = ConfusionMatrix(num_classes=cfg.num_classes, ignore_index=cfg.ignore_index)
-    set_random_seed(0)
+    set_random_seed(cfg.seed, deterministic=cfg.deterministic)
     cfg.visualize = cfg.get('visualize', False)
     if cfg.visualize:
         from openpoints.dataset.vis3d import write_obj

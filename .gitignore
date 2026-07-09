@@ -1,3 +1,6 @@
+cfgs/rohbau3d_base/sweep*
+cfgs/rohbau3d_v1/sweep*
+
 data
 data/
 wandb/

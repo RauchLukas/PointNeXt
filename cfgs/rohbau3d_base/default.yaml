@@ -85,6 +85,10 @@ wandb:
   project: PointNeXt-rb3d_v1-test
   use_wandb: True
 
+seed: 42
+deterministic: false
+metric_fraction: true
+
 
 
 save_pred: True
