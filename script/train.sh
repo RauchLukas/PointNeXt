@@ -38,18 +38,28 @@ if [[ -z "$CFG" ]]; then
     usage
 fi
 
-if [[ -n "$NUM_GPU" ]]; then
-  if [[ "$NUM_GPU" -eq 1 ]]; then
-    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-  else
-  # Pin first NUM_GPU devices when not already set by the scheduler.
-    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-      export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NUM_GPU - 1)))"
-    fi
-  fi
+# Default: 1 GPU unless -g is passed.  Sweep launch scripts pass -g explicitly.
+if [[ -z "$NUM_GPU" ]]; then
+    NUM_GPU=1
 fi
 
-EXTRA=("$@")
+if [[ "$NUM_GPU" -eq 1 ]]; then
+    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        export CUDA_VISIBLE_DEVICES=0
+    fi
+    EXTRA=(world_size=1 ngpus_per_node=1 multiprocessing_distributed=False)
+else
+    if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NUM_GPU - 1)))"
+    fi
+    EXTRA=(
+        world_size="$NUM_GPU"
+        ngpus_per_node="$NUM_GPU"
+        multiprocessing_distributed=True
+    )
+fi
+
+EXTRA+=("$@")
 if [[ -n "$RUN_NAME" ]]; then
     EXTRA+=("wandb.name=$RUN_NAME")
 fi

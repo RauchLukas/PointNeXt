@@ -40,8 +40,10 @@ BASE_CONFIGS = [
     "cfgs/rohbau3d_base/default.yaml",
     MODEL_CONFIG,
 ]
-# Each sweep run uses NUM_GPU GPU(s).  When NUM_GPU == 1 and NUM_DEVICES > 1,
-# the primary launch script runs up to NUM_DEVICES jobs concurrently (1 GPU each).
+# GPUs per training run.  NUM_GPU > 1 enables DDP (mp.spawn) on that many GPUs.
+# Sweep jobs are launched sequentially — you cannot run two 4-GPU DDP jobs at once
+# on a 4-GPU node.  Set NUM_GPU=1 and NUM_DEVICES=4 for the alternative mode
+# (up to 4 independent single-GPU jobs in parallel).
 NUM_GPU = 4
 NUM_DEVICES = 4
 
@@ -184,6 +186,9 @@ def apply_overrides(cfg, overrides):
     cfg["wandb"]["use_wandb"] = True
     cfg.setdefault("dataset", {}).setdefault("val", {})["voxel_max"] = None
     cfg.setdefault("dataset", {}).setdefault("test", {})["voxel_max"] = None
+    cfg["world_size"] = NUM_GPU
+    cfg["ngpus_per_node"] = NUM_GPU
+    cfg["multiprocessing_distributed"] = NUM_GPU > 1
     return cfg
 
 
@@ -202,9 +207,8 @@ def dump_config(cfg, path):
         yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
 
 
-def _launch_cmd(config_path, wandb_name="", num_gpu=None):
-    gpus = num_gpu if num_gpu is not None else NUM_GPU
-    gpu_flag = f" -g {gpus}" if gpus else ""
+def _launch_cmd(config_path, wandb_name=""):
+    gpu_flag = f" -g {NUM_GPU}" if NUM_GPU > 1 else ""
     if wandb_name:
         return f'bash "$SCRIPT_DIR/train.sh"{gpu_flag} -c {config_path} -n {wandb_name}'
     return f'bash "$SCRIPT_DIR/train.sh"{gpu_flag} -c {config_path}'
@@ -230,6 +234,9 @@ def _wandb_name(row):
 def write_launch_scripts(root, out_subdir, manifest_rows):
     """Write sequential and (when possible) parallel launch scripts."""
     seq_lines = _launch_header()
+    if NUM_GPU > 1:
+        seq_lines.append(f"# Each run uses {NUM_GPU}-GPU DDP; jobs run one after another.")
+        seq_lines.append("")
     for row in manifest_rows:
         seq_lines.append(_launch_cmd(row["config_path"], _wandb_name(row)))
 
@@ -265,7 +272,10 @@ def write_launch_scripts(root, out_subdir, manifest_rows):
     with open(primary_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(seq_lines) + "\n")
     os.chmod(primary_path, 0o755)
-    print(f"[{out_subdir}] launch script -> {primary_path}")
+    if NUM_GPU > 1:
+        print(f"[{out_subdir}] launch (sequential, {NUM_GPU}-GPU DDP) -> {primary_path}")
+    else:
+        print(f"[{out_subdir}] launch script -> {primary_path}")
     return primary_path, None
 
 
@@ -343,8 +353,7 @@ def build_repeat_phase(phase_cfg, base_cfg, root):
             f"Seed: {overrides.get('seed', 42)}\n"
             f"Deterministic: {overrides.get('deterministic', True)}\n\n"
             "Launch (inside container / on server):\n"
-            f"  bash script/{out_subdir}_launch.sh          # parallel ({NUM_DEVICES} GPUs)\n"
-            f"  bash script/{out_subdir}_launch_sequential.sh  # one job at a time\n\n"
+            f"  bash script/{out_subdir}_launch.sh  # sequential, {NUM_GPU}-GPU DDP per run\n\n"
             "If training is deterministic, every replicate should report the same\n"
             "val mIoU per epoch (within tiny float noise). Compare wandb runs or\n"
             f"the CSV files written under log/{DATASET}/.\n"
